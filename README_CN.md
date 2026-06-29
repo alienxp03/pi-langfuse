@@ -57,6 +57,14 @@ Langfuse API 密钥可在 **Langfuse Cloud** -> **Settings** -> **API Keys** 中
 /langfuse-setup
 ```
 
+如需查看当前配置状态且不泄漏密钥：
+
+```text
+/langfuse-status
+```
+
+状态命令会显示配置来源、主机地址、脱敏后的公钥、采集策略、是否有活跃运行、配置文件路径，以及最近一次运行时错误。
+
 ### 方式 2：环境变量
 
 在启动 Pi 前设置：
@@ -124,6 +132,7 @@ export LANGFUSE_CAPTURE_CWD=false
 ```
 
 > **安全提醒**：`~/.pi/agent/pi-langfuse/config.json` 包含敏感信息，不应提交到版本控制。
+> 扩展自行写入该文件时，会在支持 POSIX 权限的文件系统上使用 `0700` 创建配置目录，并使用 `0600` 写入配置文件。
 
 ## 验证扩展是否已加载
 
@@ -134,6 +143,14 @@ pi list
 ```
 
 已安装包列表中应出现 `pi-langfuse`。
+
+如需在 Pi 内验证 Langfuse 主机地址和 API key：
+
+```text
+/langfuse-test
+```
+
+该命令会先发起一次带超时的认证请求；认证通过后，再发送一条小的测试 trace。
 
 ## 在 Langfuse 中会看到什么
 
@@ -155,6 +172,7 @@ pi list
 ### 没有看到 trace
 
 - 先检查 API 密钥是否正确，必要时重新执行 `/langfuse-setup`。
+- 执行 `/langfuse-status`，确认当前加载的主机、配置来源、隐私模式和最近一次运行时错误。
 - 确认 Langfuse 项目处于可写状态。
 - 确认密钥具备写权限。
 - 在 Pi 输出中查找 `📊 Langfuse:` 日志。

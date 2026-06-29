@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Config } from "./types.js";
 import { CONFIG_PATH, DEFAULT_LANGFUSE_HOST } from "./constants.js";
@@ -52,8 +52,33 @@ export function loadConfig(env: EnvLike = process.env as EnvLike, path = CONFIG_
 }
 
 export function saveConfig(config: Config, path = CONFIG_PATH) {
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  chmodSync(dirname(path), 0o700);
+  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf-8", mode: 0o600 });
+  chmodSync(path, 0o600);
+}
+
+function maskPublicKey(value: string): string {
+  if (value.length <= 9) {
+    return "[REDACTED_SECRET]";
+  }
+  return `${value.slice(0, 6)}...${value.slice(-4)}`;
+}
+
+export function sanitizeConfigForLog(config: Pick<Config, "publicKey" | "secretKey" | "host"> | null): {
+  publicKey: string;
+  secretKey: string;
+  host: string;
+} | null {
+  if (!config) {
+    return null;
+  }
+
+  return {
+    publicKey: maskPublicKey(config.publicKey),
+    secretKey: "[REDACTED_SECRET]",
+    host: config.host || DEFAULT_LANGFUSE_HOST,
+  };
 }
 
 async function collectConfigFromUI(ctx: any, reason: string): Promise<Config | null> {

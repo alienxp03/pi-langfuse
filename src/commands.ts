@@ -1,11 +1,18 @@
 import { existsSync, readFileSync } from "node:fs";
 
 import { CONFIG_PATH } from "./constants.js";
-import { loadConfig, saveConfig, ensureConfig } from "./config.js";
+import {
+  loadConfig,
+  loadConfigFromEnv,
+  loadConfigFromFile,
+  sanitizeConfigForLog,
+  saveConfig,
+  ensureConfig,
+} from "./config.js";
 import { createCapturePolicy, type PrivacyPreset, type CapturePolicy } from "./capture-policy.js";
-import { getRuntime, forceShutdownRuntime as shutdownLangfuseRuntime } from "./langfuse.js";
+import { getRuntime, getLastRuntimeError, forceShutdownRuntime as shutdownLangfuseRuntime } from "./langfuse.js";
 import { state } from "./state.js";
-import type { LangfuseRuntime } from "./types.js";
+import type { Config, LangfuseRuntime } from "./types.js";
 
 const PRIVACY_PRESETS = ["metadata-only", "prompts-only", "conversations", "full-debug"] as const;
 
@@ -21,6 +28,13 @@ interface CommandDeps {
   configPath?: string;
   getRuntime?: () => Promise<LangfuseRuntime>;
   forceShutdownRuntime?: () => Promise<void>;
+  env?: Record<string, string | undefined>;
+  checkConnectivity?: (config: Config) => Promise<ConnectivityResult>;
+}
+
+interface ConnectivityResult {
+  ok: boolean;
+  message: string;
 }
 
 function notify(ctx: CommandContextLike, message: string, level: "info" | "warning" | "error" = "info") {
@@ -128,6 +142,10 @@ function describePolicy(policy: CapturePolicy) {
   ].join("\n");
 }
 
+function flag(value: boolean): "on" | "off" {
+  return value ? "on" : "off";
+}
+
 function readPersistedConfig(path: string) {
   if (!existsSync(path)) {
     return {};
@@ -146,6 +164,108 @@ function hasActiveAgentObservation() {
     }
   }
   return false;
+}
+
+function configSource(env: Record<string, string | undefined>, configPath: string): string {
+  const fileConfig = loadConfigFromFile(configPath, env);
+  const envConfig = loadConfigFromEnv(env);
+  if (fileConfig && envConfig) {
+    return "config file (env capture flags may override saved privacy)";
+  }
+  if (fileConfig) {
+    return "config file";
+  }
+  if (envConfig) {
+    return "environment variables";
+  }
+  return "none";
+}
+
+function lastErrorSummary() {
+  const lastError = getLastRuntimeError();
+  if (!lastError) {
+    return "none";
+  }
+  return `${lastError.scope}: ${lastError.message} (${lastError.timestamp.toISOString()})`;
+}
+
+function formatStatus(configPath: string, env: Record<string, string | undefined>) {
+  const config = loadConfig(env, configPath);
+  if (!config) {
+    return [
+      "pi-langfuse status:",
+      "State: not configured",
+      `Config file: ${configPath}`,
+      "Action: run /langfuse-setup or set LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY",
+      `Last error: ${lastErrorSummary()}`,
+    ].join("\n");
+  }
+
+  const safeConfig = sanitizeConfigForLog(config);
+  const policy = config.capturePolicy ?? createCapturePolicy(env);
+  return [
+    "pi-langfuse status:",
+    "State: configured",
+    `Source: ${configSource(env, configPath)}`,
+    `Host: ${safeConfig?.host ?? config.host}`,
+    `Public key: ${safeConfig?.publicKey ?? "[REDACTED_SECRET]"}`,
+    `Config file: ${configPath}`,
+    `Privacy preset: ${inferPreset(policy)}`,
+    "Capture:",
+    `  inputs: ${flag(policy.captureInputs)}`,
+    `  outputs: ${flag(policy.captureOutputs)}`,
+    `  tool IO: ${flag(policy.captureToolIo)}`,
+    `  system prompt: ${flag(policy.captureSystemPrompt)}`,
+    `  cwd: ${flag(policy.captureCwd)}`,
+    `Active run: ${hasActiveAgentObservation() ? "yes" : "no"}`,
+    `Last error: ${lastErrorSummary()}`,
+  ].join("\n");
+}
+
+async function checkLangfuseConnectivity(config: Config): Promise<ConnectivityResult> {
+  const host = config.host.replace(/\/+$/, "");
+  const auth = Buffer.from(`${config.publicKey}:${config.secretKey}`).toString("base64");
+
+  try {
+    const response = await fetch(`${host}/api/public/projects`, {
+      headers: {
+        Authorization: `Basic ${auth}`,
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (response.ok) {
+      return { ok: true, message: `Connected to ${config.host}` };
+    }
+
+    return {
+      ok: false,
+      message: `${config.host} returned ${response.status} ${response.statusText}`.trim(),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export async function handleLangfuseStatusCommand(
+  args: string,
+  ctx: CommandContextLike,
+  deps: CommandDeps = {},
+): Promise<boolean> {
+  const parsed = parseCommandArgs(args);
+  const unexpected = parsed.malformed[0] ?? parsed.positional[0] ?? Object.keys(parsed.values)[0];
+  if (unexpected) {
+    notify(ctx, `Unexpected argument '${unexpected}'. Usage: /langfuse-status`, "warning");
+    return false;
+  }
+
+  const env = deps.env ?? process.env;
+  const configPath = deps.configPath ?? CONFIG_PATH;
+  notify(ctx, formatStatus(configPath, env));
+  return true;
 }
 
 function savePrivacyPreset(
@@ -227,10 +347,17 @@ export async function handleLangfusePrivacyCommand(
 }
 
 export async function handleLangfuseTestCommand(
-  _args: string,
+  args: string,
   ctx: CommandContextLike,
   deps: CommandDeps = {},
 ): Promise<boolean> {
+  const parsed = parseCommandArgs(args);
+  const unexpected = parsed.malformed[0] ?? parsed.positional[0] ?? Object.keys(parsed.values)[0];
+  if (unexpected) {
+    notify(ctx, `Unexpected argument '${unexpected}'. Usage: /langfuse-test`, "warning");
+    return false;
+  }
+
   if (!state.config && !(await ensureConfig(ctx))) {
     notify(ctx, "Langfuse is not configured yet. Run /langfuse-setup first.", "warning");
     return false;
@@ -238,6 +365,18 @@ export async function handleLangfuseTestCommand(
 
   if (hasActiveAgentObservation()) {
     notify(ctx, "Langfuse test skipped because an agent run is active. Try again after the run finishes.", "warning");
+    return false;
+  }
+
+  const config = state.config;
+  if (!config) {
+    notify(ctx, "Langfuse is not configured yet. Run /langfuse-setup first.", "warning");
+    return false;
+  }
+
+  const connectivity = await (deps.checkConnectivity ?? checkLangfuseConnectivity)(config);
+  if (!connectivity.ok) {
+    notify(ctx, `Langfuse connectivity check failed: ${connectivity.message}`, "error");
     return false;
   }
 
@@ -270,7 +409,7 @@ export async function handleLangfuseTestCommand(
         return observation;
       },
     );
-    notify(ctx, `Langfuse test succeeded. Test trace sent to ${state.config?.host}.`);
+    notify(ctx, `Langfuse test succeeded. ${connectivity.message}; test trace sent to ${config.host}.`);
     return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

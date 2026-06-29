@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { handleLangfusePrivacyCommand, handleLangfuseTestCommand } from "../src/commands.ts";
+import { handleLangfusePrivacyCommand, handleLangfuseStatusCommand, handleLangfuseTestCommand } from "../src/commands.ts";
 import { state } from "../src/state.ts";
 import type { LangfuseObservation, LangfuseRuntime } from "../src/types.js";
 
@@ -54,12 +54,48 @@ test("test command does not hang when direct Langfuse flush stalls", async () =>
     }, {
       getRuntime: async () => runtime,
       forceShutdownRuntime: async () => {},
+      checkConnectivity: async () => ({ ok: true, message: "Connected to https://cloud.langfuse.com" }),
     }).then(() => "resolved"),
     new Promise<"timed-out">((resolve) => setTimeout(() => resolve("timed-out"), 500)),
   ]);
 
   assert.equal(result, "resolved");
-  assert.equal(notifications[0], "Langfuse test succeeded. Test trace sent to https://cloud.langfuse.com.");
+  assert.equal(
+    notifications[0],
+    "Langfuse test succeeded. Connected to https://cloud.langfuse.com; test trace sent to https://cloud.langfuse.com.",
+  );
+});
+
+test("test command reports connectivity failure before sending a test trace", async () => {
+  state.config = {
+    publicKey: "pk-lf-test",
+    secretKey: "sk-lf-test",
+    host: "https://cloud.langfuse.com",
+  };
+
+  let runtimeRequested = false;
+  const notifications: Array<{ message: string; level?: string }> = [];
+
+  const ok = await handleLangfuseTestCommand("", {
+    hasUI: true,
+    ui: {
+      notify: (message, level) => {
+        notifications.push({ message, level });
+      },
+    },
+  }, {
+    getRuntime: async () => {
+      runtimeRequested = true;
+      throw new Error("should not initialize runtime");
+    },
+    checkConnectivity: async () => ({ ok: false, message: "https://cloud.langfuse.com returned 401 Unauthorized" }),
+  });
+
+  assert.equal(ok, false);
+  assert.equal(runtimeRequested, false);
+  assert.equal(notifications[0]?.level, "error");
+  assert.match(notifications[0]?.message ?? "", /connectivity check failed/);
+  assert.match(notifications[0]?.message ?? "", /401 Unauthorized/);
 });
 
 test("privacy command opens TUI preset selector when run without arguments", async () => {
@@ -101,4 +137,38 @@ test("privacy command opens TUI preset selector when run without arguments", asy
   assert.deepEqual(selections[0].options, ["metadata-only", "prompts-only", "conversations", "full-debug"]);
   assert.equal(saved.privacyPreset, "conversations");
   assert.match(notifications.at(-1) ?? "", /Langfuse privacy preset saved: conversations/);
+});
+
+test("status command reports safe config and capture policy", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-langfuse-status-"));
+  const configPath = join(dir, "config.json");
+  writeFileSync(
+    configPath,
+    JSON.stringify({
+      publicKey: "pk-lf-1234567890abcdef",
+      secretKey: "sk-lf-secret-value",
+      host: "https://cloud.langfuse.com",
+      privacyPreset: "conversations",
+    }),
+  );
+
+  const notifications: string[] = [];
+  const ok = await handleLangfuseStatusCommand("", {
+    hasUI: true,
+    ui: {
+      notify: (message) => {
+        notifications.push(message);
+      },
+    },
+  }, {
+    configPath,
+    env: {},
+  });
+
+  assert.equal(ok, true);
+  const message = notifications[0] ?? "";
+  assert.match(message, /State: configured/);
+  assert.match(message, /Privacy preset: conversations/);
+  assert.match(message, /Public key: pk-lf-.*cdef/);
+  assert.doesNotMatch(message, /sk-lf-secret-value/);
 });

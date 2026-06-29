@@ -13,7 +13,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { state, resetRunState, runWithSession, setCurrentSession } from "./src/state.js";
 import { ensureConfig, promptForConfig, loadConfig } from "./src/config.js";
 import { shutdownRuntime } from "./src/langfuse.js";
-import { handleLangfusePrivacyCommand, handleLangfuseTestCommand } from "./src/commands.js";
+import { handleLangfusePrivacyCommand, handleLangfuseStatusCommand, handleLangfuseTestCommand } from "./src/commands.js";
 import { getMessageFromEvent, extractAssistantOutput, getCapturePolicy } from "./src/utils.js";
 import { applyCapturePolicy } from "./src/capture-policy.js";
 import { startAgentRun, finishAgentRun } from "./src/handlers/agent.js";
@@ -57,6 +57,13 @@ export default async function (pi: ExtensionAPI) {
     description: "Send a test trace to Langfuse to verify configuration",
     handler: async (args, ctx) => {
       await handleLangfuseTestCommand(String(args ?? ""), ctx);
+    },
+  });
+
+  pi.registerCommand("langfuse-status", {
+    description: "Show Langfuse configuration and runtime status",
+    handler: async (args, ctx) => {
+      await handleLangfuseStatusCommand(String(args ?? ""), ctx);
     },
   });
 

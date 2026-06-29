@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 
 let runtime: LangfuseRuntime | null = null;
 const activeSessions = new Set<string>();
+let lastRuntimeError: { scope: string; message: string; timestamp: Date } | null = null;
 
 type FallbackObservationType = "SPAN" | "GENERATION";
 
@@ -62,6 +63,18 @@ function debugLog(message: string) {
   if (process.env.PI_LANGFUSE_DEBUG === "1" || process.env.PI_LANGFUSE_DEBUG === "true") {
     console.log(message);
   }
+}
+
+function rememberRuntimeError(scope: string, error: unknown) {
+  lastRuntimeError = {
+    scope,
+    message: error instanceof Error ? error.message : String(error),
+    timestamp: new Date(),
+  };
+}
+
+export function getLastRuntimeError(): { scope: string; message: string; timestamp: Date } | null {
+  return lastRuntimeError;
 }
 
 async function withTimeout<T>(label: string, operation: Promise<T> | undefined): Promise<T | undefined> {
@@ -338,6 +351,7 @@ async function fallbackToRestIngestion(rt: LangfuseRuntime) {
   const responseErrors = responseBody?.errors;
   const errors = Array.isArray(responseErrors) ? responseErrors : [];
   if (errors.length > 0) {
+    rememberRuntimeError("REST fallback ingestion", new Error(JSON.stringify(errors)));
     console.warn("📊 Langfuse: REST fallback ingestion reported errors", errors);
   } else {
     debugLog(`📊 Langfuse: OTel trace ${trace.id} was not visible; wrote fallback trace via REST ingestion`);
@@ -371,30 +385,36 @@ export async function getRuntime(): Promise<LangfuseRuntime> {
       attempted: false,
     };
 
-    const spanProcessor = new LangfuseSpanProcessor({
-      publicKey: state.config.publicKey,
-      secretKey: state.config.secretKey,
-      baseUrl: state.config.host,
-    });
-    const tracerProvider = new BasicTracerProvider({ spanProcessors: [spanProcessor] });
-    tracing.setLangfuseTracerProvider(tracerProvider);
-
-    runtime = {
-      startObservation: ((name: string, body?: Record<string, unknown>, options?: { asType?: string }) => {
-        const observation = (tracing as any).startObservation(name, body, options);
-        return wrapObservation(observation, restFallback, name, body, options?.asType);
-      }) as unknown as LangfuseRuntime["startObservation"],
-      propagateAttributes: tracing.propagateAttributes as unknown as LangfuseRuntime["propagateAttributes"],
-      scoreClient: new LangfuseClient({
+    try {
+      const spanProcessor = new LangfuseSpanProcessor({
         publicKey: state.config.publicKey,
         secretKey: state.config.secretKey,
         baseUrl: state.config.host,
-      }) as LangfuseScoreClient,
-      spanProcessor,
-      tracerProvider,
-      clearTracerProvider: () => tracing.setLangfuseTracerProvider(null),
-      restFallback,
-    };
+      });
+      const tracerProvider = new BasicTracerProvider({ spanProcessors: [spanProcessor] });
+      tracing.setLangfuseTracerProvider(tracerProvider);
+
+      runtime = {
+        startObservation: ((name: string, body?: Record<string, unknown>, options?: { asType?: string }) => {
+          const observation = (tracing as any).startObservation(name, body, options);
+          return wrapObservation(observation, restFallback, name, body, options?.asType);
+        }) as unknown as LangfuseRuntime["startObservation"],
+        propagateAttributes: tracing.propagateAttributes as unknown as LangfuseRuntime["propagateAttributes"],
+        scoreClient: new LangfuseClient({
+          publicKey: state.config.publicKey,
+          secretKey: state.config.secretKey,
+          baseUrl: state.config.host,
+        }) as LangfuseScoreClient,
+        spanProcessor,
+        tracerProvider,
+        clearTracerProvider: () => tracing.setLangfuseTracerProvider(null),
+        restFallback,
+      };
+      lastRuntimeError = null;
+    } catch (e) {
+      rememberRuntimeError("runtime init", e);
+      throw e;
+    }
   }
 
   return runtime as LangfuseRuntime;
@@ -416,6 +436,7 @@ function doShutdownRuntime(): Promise<void> {
       await withTimeout("Langfuse client shutdown", rt.scoreClient.shutdown?.());
       await withTimeout("OTel tracer shutdown", rt.tracerProvider?.shutdown?.());
     } catch (e) {
+      rememberRuntimeError("runtime shutdown", e);
       console.warn("📊 Langfuse: Failed to flush/shutdown cleanly", e);
     } finally {
       if (!runtime) {
@@ -472,6 +493,7 @@ export async function sendScore(name: string, value: number, options: { traceId?
       sessionId: options.traceId ? undefined : state.currentSessionId || undefined,
     });
   } catch (e) {
+    rememberRuntimeError(`score ${name}`, e);
     console.warn(`📊 Langfuse: Failed to send score ${name}`, e);
   }
 }

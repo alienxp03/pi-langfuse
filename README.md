@@ -57,6 +57,14 @@ To run setup again:
 /langfuse-setup
 ```
 
+To inspect the active configuration without exposing secrets:
+
+```text
+/langfuse-status
+```
+
+The status command reports the config source, host, masked public key, capture policy, active-run state, config path, and last runtime error.
+
 ### Method 2: Environment variables
 
 Set these before starting Pi:
@@ -124,6 +132,7 @@ Fine-grained capture flags can also be persisted:
 ```
 
 > **Security**: Keep `~/.pi/agent/pi-langfuse/config.json` private. Never commit API keys to version control.
+> When the extension writes this file itself, it creates the config directory with `0700` permissions and the file with `0600` permissions where the host filesystem supports POSIX modes.
 
 ## Verify the Extension
 
@@ -134,6 +143,14 @@ pi list
 ```
 
 `pi-langfuse` should appear in the installed package list.
+
+To verify the Langfuse host and API keys from inside Pi, run:
+
+```text
+/langfuse-test
+```
+
+This command makes a timeout-bounded authenticated request to Langfuse and, if it succeeds, sends a small test trace.
 
 ## What Appears in Langfuse
 
@@ -202,6 +219,7 @@ The extension must not upload raw absolute local paths, credentialed remotes, to
 ### No traces appearing?
 
 - Verify the API keys and run `/langfuse-setup` again if needed.
+- Run `/langfuse-status` to confirm the loaded host, config source, privacy mode, and last runtime error.
 - Confirm the Langfuse project is active and accepts writes.
 - Confirm the keys have write permission.
 - Look for `📊 Langfuse:` log messages in Pi output.
