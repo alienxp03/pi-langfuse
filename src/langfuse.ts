@@ -3,10 +3,22 @@ import { state } from "./state.js";
 import { randomUUID } from "node:crypto";
 
 let runtime: LangfuseRuntime | null = null;
+let registeredContextManager: OtelContextManager | null = null;
 const activeSessions = new Set<string>();
 let lastRuntimeError: { scope: string; message: string; timestamp: Date } | null = null;
 
 type FallbackObservationType = "SPAN" | "GENERATION";
+
+interface OtelContextManager {
+  enable(): OtelContextManager;
+  disable(): void;
+}
+
+interface OtelContextApi {
+  setGlobalContextManager(contextManager: OtelContextManager): boolean;
+}
+
+type AsyncHooksContextManagerCtor = new () => OtelContextManager;
 
 interface RestFallbackTrace {
   id: string;
@@ -63,6 +75,24 @@ function debugLog(message: string) {
   if (process.env.PI_LANGFUSE_DEBUG === "1" || process.env.PI_LANGFUSE_DEBUG === "true") {
     console.log(message);
   }
+}
+
+export function ensureOtelContextManager(
+  contextApi: OtelContextApi,
+  AsyncHooksContextManager: AsyncHooksContextManagerCtor,
+): boolean {
+  if (registeredContextManager) {
+    return true;
+  }
+
+  const contextManager = new AsyncHooksContextManager().enable();
+  if (contextApi.setGlobalContextManager(contextManager)) {
+    registeredContextManager = contextManager;
+    return true;
+  }
+
+  contextManager.disable();
+  return false;
 }
 
 function rememberRuntimeError(scope: string, error: unknown) {
@@ -372,8 +402,17 @@ export async function getRuntime(): Promise<LangfuseRuntime> {
   }
 
   if (!runtime) {
-    const [{ BasicTracerProvider }, { LangfuseSpanProcessor }, tracing, { LangfuseClient }] = await Promise.all([
+    const [
+      { BasicTracerProvider },
+      { context },
+      { AsyncHooksContextManager },
+      { LangfuseSpanProcessor },
+      tracing,
+      { LangfuseClient },
+    ] = await Promise.all([
       import("@opentelemetry/sdk-trace-base"),
+      import("@opentelemetry/api"),
+      import("@opentelemetry/context-async-hooks"),
       import("@langfuse/otel"),
       import("@langfuse/tracing"),
       import("@langfuse/client"),
@@ -386,6 +425,7 @@ export async function getRuntime(): Promise<LangfuseRuntime> {
     };
 
     try {
+      ensureOtelContextManager(context, AsyncHooksContextManager);
       const spanProcessor = new LangfuseSpanProcessor({
         publicKey: state.config.publicKey,
         secretKey: state.config.secretKey,
