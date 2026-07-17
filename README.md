@@ -104,6 +104,27 @@ export LANGFUSE_CAPTURE_CWD=false
 
 All captured payloads are redacted before upload. The extension masks common API keys, bearer tokens, passwords, cookies, private keys, Langfuse keys, GitHub/npm/AWS-style tokens, and local absolute paths.
 
+### Payload limits
+
+Before upload, payloads are shaped: strings are truncated and deeply nested or
+very wide structures are trimmed. These caps keep traces small and protect the
+Langfuse ingestion pipeline. Override any of them (no rebuild needed):
+
+```bash
+export PI_LANGFUSE_MAX_STRING_LENGTH=12000       # per-string chars (system prompt, inputs)
+export PI_LANGFUSE_MAX_TOOL_PAYLOAD_LENGTH=24000 # per tool input/output chars
+export PI_LANGFUSE_MAX_DEPTH=6                    # max nesting depth
+export PI_LANGFUSE_MAX_ARRAY_ITEMS=50            # max array elements kept
+export PI_LANGFUSE_MAX_OBJECT_KEYS=80            # max object keys kept
+export PI_LANGFUSE_MAX_PAYLOAD_NODES=2000        # max total nodes per payload
+```
+
+Set any limit to `0`, `off`, `none`, or `unlimited` to disable that cap
+entirely (captures the full value). Unset or invalid values fall back to the
+defaults shown above. To capture a very large system prompt or big tool
+payloads in full, raise or disable the relevant limit (e.g.
+`PI_LANGFUSE_MAX_STRING_LENGTH=off`).
+
 ### Method 3: Persistent `config.json`
 
 Create or update `~/.pi/agent/pi-langfuse/config.json`:

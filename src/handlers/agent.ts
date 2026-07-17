@@ -1,7 +1,7 @@
 import { state, resetRunState, computeEvaluationScores } from "../state.js";
 import { getRuntime, sendScore } from "../langfuse.js";
 import { ensureConfig } from "../config.js";
-import { shapePayload, truncate, extractFinalAssistant, extractAssistantOutput, getCapturePolicy } from "../utils.js";
+import { shapePayload, truncate, extractFinalAssistant, extractAssistantOutput, getCapturePolicy, getLimits } from "../utils.js";
 import { closeDanglingObservations } from "./tool.js";
 import { applyCapturePolicy } from "../capture-policy.js";
 import { collectSourceMetadata } from "../source-metadata.js";
@@ -79,7 +79,7 @@ export async function startAgentRun(event: Record<string, unknown>, ctx: any) {
           ...(state.currentProvider ? { provider: state.currentProvider } : {}),
           sessionId: state.currentSessionId || undefined,
         },
-        systemPrompt: systemPrompt ? truncate(String(systemPrompt), 20000) : undefined,
+        systemPrompt: systemPrompt ? truncate(String(systemPrompt), getLimits().maxString) : undefined,
       },
       getCapturePolicy(),
     );
