@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { getLimits } from "./limits.js";
 
 export const REDACTED = "[REDACTED_SECRET]";
 
@@ -9,12 +10,15 @@ export interface RedactOptions {
   maxStringLength: number;
 }
 
-const DEFAULT_OPTIONS: RedactOptions = {
-  maxDepth: 6,
-  maxArrayItems: 50,
-  maxObjectKeys: 80,
-  maxStringLength: 12_000,
-};
+function defaultOptions(): RedactOptions {
+  const limits = getLimits();
+  return {
+    maxDepth: limits.maxDepth,
+    maxArrayItems: limits.maxArrayItems,
+    maxObjectKeys: limits.maxObjectKeys,
+    maxStringLength: limits.maxString,
+  };
+}
 
 const SECRET_ASSIGNMENT_RE =
   /\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASS|API[_-]?KEY|PRIVATE[_-]?KEY|AUTH|COOKIE)[A-Z0-9_]*)\s*=\s*([^\s"'`]+)/gi;
@@ -36,7 +40,7 @@ function truncate(value: string, maxStringLength: number): string {
 }
 
 export function redactString(value: string, options: Partial<RedactOptions> = {}): string {
-  const merged = { ...DEFAULT_OPTIONS, ...options };
+  const merged = { ...defaultOptions(), ...options };
   const truncated = truncate(value, merged.maxStringLength);
   return truncated
     .replace(PRIVATE_KEY_RE, REDACTED)
@@ -110,6 +114,6 @@ function visit(value: unknown, options: RedactOptions, depth: number, seen: Weak
 }
 
 export function redactValue(value: unknown, options: Partial<RedactOptions> = {}): unknown {
-  const merged: RedactOptions = { ...DEFAULT_OPTIONS, ...options };
+  const merged: RedactOptions = { ...defaultOptions(), ...options };
   return visit(value, merged, merged.maxDepth, new WeakSet<object>());
 }

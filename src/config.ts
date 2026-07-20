@@ -5,6 +5,7 @@ import { CONFIG_PATH, DEFAULT_LANGFUSE_HOST } from "./constants.js";
 import { state } from "./state.js";
 import { forceShutdownRuntime } from "./langfuse.js";
 import { createCapturePolicy, type EnvLike } from "./capture-policy.js";
+import { createPayloadLimits } from "./limits.js";
 
 export function loadConfigFromFile(path = CONFIG_PATH, env: EnvLike = process.env as EnvLike): Config | null {
   if (existsSync(path)) {
@@ -22,6 +23,7 @@ export function loadConfigFromFile(path = CONFIG_PATH, env: EnvLike = process.en
           secretKey: config.secretKey,
           host: config.host || DEFAULT_LANGFUSE_HOST,
           capturePolicy: createCapturePolicy(captureSource),
+          limits: createPayloadLimits(env),
         };
       }
     } catch (e) {
@@ -44,6 +46,7 @@ export function loadConfigFromEnv(env: EnvLike = process.env as EnvLike): Config
     secretKey,
     host: env.LANGFUSE_BASE_URL || env.LANGFUSE_HOST || DEFAULT_LANGFUSE_HOST,
     capturePolicy: createCapturePolicy(env),
+    limits: createPayloadLimits(env),
   };
 }
 

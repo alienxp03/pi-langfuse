@@ -1,11 +1,4 @@
-import {
-  MAX_ARRAY_ITEMS,
-  MAX_DEPTH,
-  MAX_OBJECT_KEYS,
-  MAX_PAYLOAD_NODES,
-  MAX_STRING_LENGTH,
-  MAX_TOOL_PAYLOAD_LENGTH,
-} from "./constants.js";
+import { getLimits } from "./limits.js";
 import { createCapturePolicy, type CapturePolicy } from "./capture-policy.js";
 import { redactValue } from "./redaction.js";
 import { state } from "./state.js";
@@ -14,7 +7,9 @@ export function getCapturePolicy(): CapturePolicy {
   return state.config?.capturePolicy ?? createCapturePolicy();
 }
 
-export function truncate(value: string, maxLength = MAX_STRING_LENGTH): string {
+export { getLimits };
+
+export function truncate(value: string, maxLength = getLimits().maxString): string {
   return value.length > maxLength ? `${value.slice(0, maxLength)}... [truncated]` : value;
 }
 
@@ -35,11 +30,22 @@ const PAYLOAD_TOO_LARGE = "[payload too large]";
 
 export function shapePayload(
   value: unknown,
-  options: { maxString?: number; depth?: number; maxNodes?: number; redact?: boolean; parseJson?: boolean } = {},
+  options: {
+    maxString?: number;
+    depth?: number;
+    maxNodes?: number;
+    maxArrayItems?: number;
+    maxObjectKeys?: number;
+    redact?: boolean;
+    parseJson?: boolean;
+  } = {},
 ): unknown {
-  const maxString = options.maxString ?? MAX_STRING_LENGTH;
-  const depth = options.depth ?? MAX_DEPTH;
-  const maxNodes = options.maxNodes ?? MAX_PAYLOAD_NODES;
+  const limits = getLimits();
+  const maxString = options.maxString ?? limits.maxString;
+  const depth = options.depth ?? limits.maxDepth;
+  const maxNodes = options.maxNodes ?? limits.maxNodes;
+  const maxArrayItems = options.maxArrayItems ?? limits.maxArrayItems;
+  const maxObjectKeys = options.maxObjectKeys ?? limits.maxObjectKeys;
   const budget = { exhausted: false, nodeCount: 0 };
 
   function visit(item: unknown, remainingDepth: number, seen: WeakSet<object>): unknown {
@@ -88,7 +94,7 @@ export function shapePayload(
 
     if (Array.isArray(item)) {
       const output: unknown[] = [];
-      const limit = Math.min(item.length, MAX_ARRAY_ITEMS);
+      const limit = Math.min(item.length, maxArrayItems);
       for (let index = 0; index < limit; index++) {
         output.push(visit(item[index], remainingDepth - 1, seen));
         if (budget.exhausted) {
@@ -120,7 +126,7 @@ export function shapePayload(
         }
         output[key] = visit((item as Record<string, unknown>)[key], remainingDepth - 1, seen);
         keyCount++;
-        if (budget.exhausted || keyCount >= MAX_OBJECT_KEYS) {
+        if (budget.exhausted || keyCount >= maxObjectKeys) {
           break;
         }
       }
@@ -136,12 +142,12 @@ export function shapePayload(
     : redactValue(shaped, {
         maxDepth: depth,
         maxStringLength: maxString,
-        maxArrayItems: MAX_ARRAY_ITEMS,
-        maxObjectKeys: MAX_OBJECT_KEYS,
+        maxArrayItems,
+        maxObjectKeys,
       });
 }
 
-export function safeSerialize(value: unknown, maxLength = MAX_TOOL_PAYLOAD_LENGTH): string {
+export function safeSerialize(value: unknown, maxLength = getLimits().maxToolPayload): string {
   try {
     return truncate(JSON.stringify(shapePayload(value, { maxString: maxLength }), null, 2), maxLength);
   } catch {
@@ -149,7 +155,7 @@ export function safeSerialize(value: unknown, maxLength = MAX_TOOL_PAYLOAD_LENGT
   }
 }
 
-export function estimatePayloadBytes(value: unknown, maxLength = MAX_TOOL_PAYLOAD_LENGTH): number {
+export function estimatePayloadBytes(value: unknown, maxLength = getLimits().maxToolPayload): number {
   return new TextEncoder().encode(safeSerialize(value, maxLength)).length;
 }
 

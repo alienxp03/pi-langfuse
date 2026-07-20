@@ -10,8 +10,8 @@ import {
   truncate,
   estimatePayloadBytes,
   getCapturePolicy,
+  getLimits,
 } from "../utils.js";
-import { MAX_TOOL_PAYLOAD_LENGTH } from "../constants.js";
 import { applyCapturePolicy } from "../capture-policy.js";
 import { redactString } from "../redaction.js";
 
@@ -28,7 +28,7 @@ export async function startToolObservation(event: Record<string, unknown>) {
   try {
     const toolName = getToolName(event);
     const toolInput = getToolInput(event);
-    const shapedInput = shapePayload(toolInput, { maxString: MAX_TOOL_PAYLOAD_LENGTH });
+    const shapedInput = shapePayload(toolInput, { maxString: getLimits().maxToolPayload });
     const captured = applyCapturePolicy(
       {
         toolInput: shapedInput,
@@ -36,7 +36,7 @@ export async function startToolObservation(event: Record<string, unknown>) {
       },
       getCapturePolicy(),
     );
-    const inputBytes = estimatePayloadBytes(captured.toolInput, MAX_TOOL_PAYLOAD_LENGTH);
+    const inputBytes = estimatePayloadBytes(captured.toolInput, getLimits().maxToolPayload);
     const parent = state.agentState.activeTurn ?? state.agentState.root;
     const tool = await startChildObservation({
       parent,
@@ -79,7 +79,7 @@ export async function finishToolObservation(event: Record<string, unknown>) {
 
   const isError = Boolean(event.isError ?? event.error ?? event.status === "error");
   const output =
-    extractTextContent(event.content, MAX_TOOL_PAYLOAD_LENGTH) ??
+    extractTextContent(event.content, getLimits().maxToolPayload) ??
     event.output ??
     event.result ??
     event.error ??
@@ -87,7 +87,7 @@ export async function finishToolObservation(event: Record<string, unknown>) {
     event;
 
   try {
-    const shapedOutput = shapePayload(output, { maxString: MAX_TOOL_PAYLOAD_LENGTH });
+    const shapedOutput = shapePayload(output, { maxString: getLimits().maxToolPayload });
     const captured = applyCapturePolicy(
       {
         toolOutput: shapedOutput,
@@ -99,7 +99,7 @@ export async function finishToolObservation(event: Record<string, unknown>) {
       },
       getCapturePolicy(),
     );
-    const outputBytes = estimatePayloadBytes(captured.toolOutput, MAX_TOOL_PAYLOAD_LENGTH);
+    const outputBytes = estimatePayloadBytes(captured.toolOutput, getLimits().maxToolPayload);
     const durationMs = Math.max(0, Date.now() - activeTool.startedAt);
 
     activeTool.observation
