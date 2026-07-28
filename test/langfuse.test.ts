@@ -1,7 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
-import { __setRuntimeForTest, ensureOtelContextManager, forceShutdownRuntime } from "../src/langfuse.ts";
+import {
+  __setRuntimeForTest,
+  ensureOtelContextManager,
+  forceShutdownRuntime,
+  getRuntime,
+  sendScore,
+} from "../src/langfuse.ts";
+import { state } from "../src/state.ts";
 import type { LangfuseRuntime } from "../src/types.js";
 
 import { BasicTracerProvider } from "@opentelemetry/sdk-trace-base";
@@ -12,6 +21,35 @@ import { AsyncHooksContextManager } from "@opentelemetry/context-async-hooks";
 
 function never(): Promise<void> {
   return new Promise(() => {});
+}
+
+function createTestRuntime(overrides: Partial<LangfuseRuntime> = {}): LangfuseRuntime {
+  return {
+    startObservation: (() => {
+      throw new Error("not used");
+    }) as LangfuseRuntime["startObservation"],
+    propagateAttributes: (() => {
+      throw new Error("not used");
+    }) as LangfuseRuntime["propagateAttributes"],
+    scoreClient: {},
+    ...overrides,
+  };
+}
+
+async function disposeTestRuntime(runtime: LangfuseRuntime) {
+  const scoreRuntime = runtime as LangfuseRuntime & {
+    scoreFlushStopped?: boolean;
+    scoreFlushTimer?: NodeJS.Timeout;
+    scoreFlushController?: AbortController;
+    scoreFlushPromise?: Promise<void>;
+  };
+  scoreRuntime.scoreFlushStopped = true;
+  if (scoreRuntime.scoreFlushTimer) {
+    clearTimeout(scoreRuntime.scoreFlushTimer);
+  }
+  scoreRuntime.scoreFlushController?.abort();
+  await scoreRuntime.scoreFlushPromise;
+  __setRuntimeForTest(null);
 }
 
 test("registers OTel context propagation for Langfuse trace attributes", async () => {
@@ -118,14 +156,7 @@ test("force shutdown does not hang when Langfuse SDK shutdown stalls", async () 
   }
 });
 
-test("REST fallback calls Langfuse ingestion with its SDK receiver", async () => {
-  const ingestion = {
-    called: false,
-    async batch(this: { called: boolean }, _request: unknown) {
-      this.called = true;
-      return {};
-    },
-  };
+test("force shutdown applies one total deadline to stalled telemetry operations", async () => {
   const runtime = {
     startObservation: (() => {
       throw new Error("not used");
@@ -134,16 +165,443 @@ test("REST fallback calls Langfuse ingestion with its SDK receiver", async () =>
       throw new Error("not used");
     }) as LangfuseRuntime["propagateAttributes"],
     scoreClient: {
-      api: {
-        trace: {
-          get: async () => undefined,
+      flush: never,
+      shutdown: never,
+    },
+    tracerProvider: {
+      forceFlush: never,
+      shutdown: never,
+    },
+    clearTracerProvider: () => {},
+  } satisfies LangfuseRuntime;
+
+  const originalWarn = console.warn;
+  const originalLog = console.log;
+  console.warn = () => {};
+  console.log = () => {};
+
+  try {
+    __setRuntimeForTest(runtime, 50);
+    const startedAt = performance.now();
+    await forceShutdownRuntime();
+
+    assert.ok(performance.now() - startedAt < 125);
+  } finally {
+    __setRuntimeForTest(null);
+    console.warn = originalWarn;
+    console.log = originalLog;
+  }
+});
+
+test("runtime preserves the configured Langfuse OTel request timeout", async () => {
+  const previousTimeout = process.env.LANGFUSE_TIMEOUT;
+  const previousConfig = state.config;
+
+  try {
+    process.env.LANGFUSE_TIMEOUT = "12";
+    state.config = {
+      publicKey: "pk_test",
+      secretKey: "sk_test",
+      host: "http://127.0.0.1:1",
+    };
+
+    const runtime = await getRuntime();
+    const timeoutMs = (runtime.spanProcessor as any)
+      .processor._exporter._delegate._timeout;
+
+    assert.equal(timeoutMs, 12_000);
+  } finally {
+    await forceShutdownRuntime();
+    state.config = previousConfig;
+    if (previousTimeout === undefined) {
+      delete process.env.LANGFUSE_TIMEOUT;
+    } else {
+      process.env.LANGFUSE_TIMEOUT = previousTimeout;
+    }
+  }
+});
+
+test("buffered scores inherit the Langfuse tracing environment", async () => {
+  const previousEnvironment = process.env.LANGFUSE_TRACING_ENVIRONMENT;
+  const previousConfig = state.config;
+  const runtime = createTestRuntime({ pendingScores: [] });
+
+  try {
+    process.env.LANGFUSE_TRACING_ENVIRONMENT = "production";
+    state.config = {
+      publicKey: "pk_test",
+      secretKey: "sk_test",
+      host: "http://localhost",
+    };
+    __setRuntimeForTest(runtime);
+
+    await sendScore("turn_count", 1, { traceId: "trace-1" });
+
+    assert.equal(runtime.pendingScores?.[0]?.environment, "production");
+  } finally {
+    __setRuntimeForTest(null);
+    state.config = previousConfig;
+    if (previousEnvironment === undefined) {
+      delete process.env.LANGFUSE_TRACING_ENVIRONMENT;
+    } else {
+      process.env.LANGFUSE_TRACING_ENVIRONMENT = previousEnvironment;
+    }
+  }
+});
+
+test("score buffer drops new scores when the queue reaches capacity", async () => {
+  const score = {
+    name: "turn_count",
+    value: 1,
+    dataType: "NUMERIC" as const,
+  };
+  const runtime = createTestRuntime({
+    pendingScores: Array(100_000).fill(score),
+  });
+  const previousConfig = state.config;
+  const originalWarn = console.warn;
+  const warnings: unknown[][] = [];
+  console.warn = (...args: unknown[]) => warnings.push(args);
+
+  try {
+    state.config = {
+      publicKey: "pk_test",
+      secretKey: "sk_test",
+      host: "http://localhost",
+    };
+    __setRuntimeForTest(runtime);
+
+    await sendScore("turn_count", 2);
+
+    assert.equal(runtime.pendingScores?.length, 100_000);
+    assert.match(String(warnings[0]?.[0]), /queue is full/i);
+  } finally {
+    await disposeTestRuntime(runtime);
+    state.config = previousConfig;
+    console.warn = originalWarn;
+  }
+});
+
+test("score threshold starts one flush and removes a successful batch", async () => {
+  let requests = 0;
+  const originalFetch = globalThis.fetch;
+  const previousConfig = state.config;
+  const runtime = createTestRuntime({
+    pendingScores: [],
+    scoreFlushAt: 2,
+    scoreFlushIntervalMs: 60_000,
+    scoreRequestTimeoutMs: 1_000,
+    runtimeConfig: {
+      publicKey: "pk_test",
+      secretKey: "sk_test",
+      host: "https://example.com",
+    },
+  });
+  globalThis.fetch = (async () => {
+    requests += 1;
+    return new Response(JSON.stringify({ errors: [] }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    state.config = { ...runtime.runtimeConfig! };
+    __setRuntimeForTest(runtime);
+
+    await sendScore("turn_count", 1);
+    await sendScore("tool_call_count", 2);
+    await (runtime as any).scoreFlushPromise;
+
+    assert.equal(requests, 1);
+    assert.deepEqual(runtime.pendingScores, []);
+  } finally {
+    await disposeTestRuntime(runtime);
+    state.config = previousConfig;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("score timer is unrefed and periodically flushes", async () => {
+  let requests = 0;
+  const originalFetch = globalThis.fetch;
+  const previousConfig = state.config;
+  const runtime = createTestRuntime({
+    pendingScores: [],
+    scoreFlushAt: 10,
+    scoreFlushIntervalMs: 5,
+    scoreRequestTimeoutMs: 1_000,
+    runtimeConfig: {
+      publicKey: "pk_test",
+      secretKey: "sk_test",
+      host: "https://example.com",
+    },
+  });
+  globalThis.fetch = (async () => {
+    requests += 1;
+    return new Response(JSON.stringify({ errors: [] }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    state.config = { ...runtime.runtimeConfig! };
+    __setRuntimeForTest(runtime);
+
+    await sendScore("turn_count", 1);
+
+    assert.equal((runtime as any).scoreFlushTimer?.hasRef(), false);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(requests, 1);
+  } finally {
+    await disposeTestRuntime(runtime);
+    state.config = previousConfig;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("failed score ingestion keeps the batch queued", async () => {
+  let requests = 0;
+  const originalFetch = globalThis.fetch;
+  const previousConfig = state.config;
+  const originalWarn = console.warn;
+  const runtime = createTestRuntime({
+    pendingScores: [],
+    scoreFlushAt: 1,
+    scoreFlushIntervalMs: 60_000,
+    scoreRequestTimeoutMs: 1_000,
+    runtimeConfig: {
+      publicKey: "pk_test",
+      secretKey: "sk_test",
+      host: "https://example.com",
+    },
+  });
+  globalThis.fetch = (async () => {
+    requests += 1;
+    return new Response("Gateway Timeout", { status: 504 });
+  }) as typeof fetch;
+  console.warn = () => {};
+
+  try {
+    state.config = { ...runtime.runtimeConfig! };
+    __setRuntimeForTest(runtime);
+
+    await sendScore("turn_count", 1);
+    await (runtime as any).scoreFlushPromise;
+
+    assert.equal(requests, 1);
+    assert.equal(runtime.pendingScores?.length, 1);
+  } finally {
+    await disposeTestRuntime(runtime);
+    state.config = previousConfig;
+    globalThis.fetch = originalFetch;
+    console.warn = originalWarn;
+  }
+});
+
+test("shutdown aborts an active score request and retries within its deadline", async () => {
+  let calls = 0;
+  let firstRequestAborted = false;
+  const originalFetch = globalThis.fetch;
+  const previousConfig = state.config;
+  const runtime = createTestRuntime({
+    pendingScores: [],
+    scoreFlushAt: 1,
+    scoreFlushIntervalMs: 60_000,
+    scoreRequestTimeoutMs: 60_000,
+    runtimeConfig: {
+      publicKey: "pk_test",
+      secretKey: "sk_test",
+      host: "https://example.com",
+    },
+  });
+  globalThis.fetch = ((_input, init) => {
+    calls += 1;
+    if (calls === 1) {
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          firstRequestAborted = true;
+          reject(new DOMException("Aborted", "AbortError"));
+        }, { once: true });
+      });
+    }
+    return Promise.resolve(
+      new Response(JSON.stringify({ errors: [] }), { status: 200 }),
+    );
+  }) as typeof fetch;
+
+  try {
+    state.config = { ...runtime.runtimeConfig! };
+    __setRuntimeForTest(runtime, 200);
+
+    await sendScore("turn_count", 1);
+    await forceShutdownRuntime();
+
+    assert.equal(firstRequestAborted, true);
+    assert.equal(calls, 2);
+    assert.deepEqual(runtime.pendingScores, []);
+  } finally {
+    await disposeTestRuntime(runtime);
+    state.config = previousConfig;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("scores are buffered instead of starting an unbounded SDK request", async () => {
+  let scoreCreateCalls = 0;
+  const runtime = {
+    startObservation: (() => {
+      throw new Error("not used");
+    }) as LangfuseRuntime["startObservation"],
+    propagateAttributes: (() => {
+      throw new Error("not used");
+    }) as LangfuseRuntime["propagateAttributes"],
+    scoreClient: {
+      score: {
+        create: () => {
+          scoreCreateCalls += 1;
         },
-        ingestion,
       },
+    },
+    pendingScores: [],
+  } satisfies LangfuseRuntime;
+  const previousConfig = state.config;
+
+  try {
+    state.config = { publicKey: "pk_test", secretKey: "sk_test", host: "http://localhost" };
+    __setRuntimeForTest(runtime);
+
+    await sendScore("turn_count", 1, { traceId: "trace-1" });
+
+    assert.equal(scoreCreateCalls, 0);
+    assert.deepEqual(runtime.pendingScores, [{
+      name: "turn_count",
+      value: 1,
+      dataType: "NUMERIC",
+      traceId: "trace-1",
+      observationId: undefined,
+      sessionId: undefined,
+    }]);
+  } finally {
+    __setRuntimeForTest(null);
+    state.config = previousConfig;
+  }
+});
+
+test("score flush uses the runtime's original config after global config is cleared", async () => {
+  const requests: Array<{ url: string; authorization: string | null }> = [];
+  const runtime = {
+    startObservation: (() => {
+      throw new Error("not used");
+    }) as LangfuseRuntime["startObservation"],
+    propagateAttributes: (() => {
+      throw new Error("not used");
+    }) as LangfuseRuntime["propagateAttributes"],
+    scoreClient: {},
+    runtimeConfig: {
+      publicKey: "pk-old",
+      secretKey: "sk-old",
+      host: "https://old.example.com",
+    },
+    pendingScores: [{
+      name: "turn_count",
+      value: 1,
+      dataType: "NUMERIC" as const,
+      traceId: "trace-1",
+    }],
+  } satisfies LangfuseRuntime;
+
+  const originalFetch = globalThis.fetch;
+  const previousConfig = state.config;
+  globalThis.fetch = (async (input, init) => {
+    const headers = new Headers(init?.headers);
+    requests.push({
+      url: String(input),
+      authorization: headers.get("Authorization"),
+    });
+    return new Response(JSON.stringify({ successes: [], errors: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    state.config = null;
+    __setRuntimeForTest(runtime, 200);
+
+    await forceShutdownRuntime();
+
+    assert.deepEqual(requests, [{
+      url: "https://old.example.com/api/public/ingestion",
+      authorization: `Basic ${Buffer.from("pk-old:sk-old").toString("base64")}`,
+    }]);
+  } finally {
+    __setRuntimeForTest(null);
+    state.config = previousConfig;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("score flush logs per-event ingestion errors", async () => {
+  const runtime = {
+    startObservation: (() => {
+      throw new Error("not used");
+    }) as LangfuseRuntime["startObservation"],
+    propagateAttributes: (() => {
+      throw new Error("not used");
+    }) as LangfuseRuntime["propagateAttributes"],
+    scoreClient: {},
+    runtimeConfig: {
+      publicKey: "pk-test",
+      secretKey: "sk-test",
+      host: "https://example.com",
+    },
+    pendingScores: [{
+      name: "turn_count",
+      value: 1,
+      dataType: "NUMERIC" as const,
+      traceId: "trace-1",
+    }],
+  } satisfies LangfuseRuntime;
+
+  const originalFetch = globalThis.fetch;
+  const originalWarn = console.warn;
+  const warnings: unknown[][] = [];
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    successes: [],
+    errors: [{ id: "event-1", status: 400, message: "invalid score" }],
+  }), {
+    status: 207,
+    headers: { "Content-Type": "application/json" },
+  })) as typeof fetch;
+  console.warn = (...args: unknown[]) => warnings.push(args);
+
+  try {
+    __setRuntimeForTest(runtime, 200);
+    await forceShutdownRuntime();
+
+    assert.equal(warnings.length, 1);
+    assert.match(String(warnings[0][0]), /reported errors/i);
+  } finally {
+    __setRuntimeForTest(null);
+    globalThis.fetch = originalFetch;
+    console.warn = originalWarn;
+  }
+});
+
+test("REST fallback checks visibility and ingests the trace through abortable HTTP", async () => {
+  const requests: Array<{ method: string; url: string; body?: string }> = [];
+  const runtime = {
+    startObservation: (() => {
+      throw new Error("not used");
+    }) as LangfuseRuntime["startObservation"],
+    propagateAttributes: (() => {
+      throw new Error("not used");
+    }) as LangfuseRuntime["propagateAttributes"],
+    scoreClient: {},
+    runtimeConfig: {
+      publicKey: "pk-test",
+      secretKey: "sk-test",
+      host: "https://example.com",
     },
     restFallback: {
       trace: {
-        id: "trace-uses-bound-batch",
+        id: "fallback-trace",
         timestamp: new Date().toISOString(),
         name: "pi-agent",
       },
@@ -153,24 +611,56 @@ test("REST fallback calls Langfuse ingestion with its SDK receiver", async () =>
     },
   } satisfies LangfuseRuntime;
 
-  const logs: unknown[][] = [];
-  const originalWarn = console.warn;
-  const originalLog = console.log;
-  console.warn = () => {};
-  console.log = (...args: unknown[]) => {
-    logs.push(args);
-  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input, init) => {
+    const method = init?.method ?? "GET";
+    requests.push({
+      method,
+      url: String(input),
+      body: typeof init?.body === "string" ? init.body : undefined,
+    });
+    if (method === "GET") {
+      return new Response(null, { status: 404 });
+    }
+    return new Response(JSON.stringify({ successes: [], errors: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
 
   try {
-    __setRuntimeForTest(runtime, 50);
-
+    __setRuntimeForTest(runtime, 2_000);
     await forceShutdownRuntime();
 
-    assert.equal(ingestion.called, true);
-    assert.deepEqual(logs, []);
+    assert.ok(requests.some((request) =>
+      request.method === "GET"
+      && request.url === "https://example.com/api/public/traces/fallback-trace"));
+    const ingestion = requests.find((request) => request.method === "POST");
+    assert.equal(ingestion?.url, "https://example.com/api/public/ingestion");
+    assert.match(ingestion?.body ?? "", /"type":"trace-create"/);
   } finally {
     __setRuntimeForTest(null);
-    console.warn = originalWarn;
-    console.log = originalLog;
+    globalThis.fetch = originalFetch;
   }
+});
+
+test("shutdown aborts stalled score HTTP work so a child process exits", async () => {
+  const fixture = fileURLToPath(new URL("./fixtures/stalled-shutdown-child.ts", import.meta.url));
+  const child = spawn(process.execPath, ["--import", "tsx", fixture], {
+    cwd: process.cwd(),
+    stdio: "ignore",
+  });
+
+  const result = await new Promise<{ code: number | null; timedOut: boolean }>((resolve) => {
+    const timeout = setTimeout(() => {
+      child.kill();
+      resolve({ code: null, timedOut: true });
+    }, 750);
+    child.once("exit", (code) => {
+      clearTimeout(timeout);
+      resolve({ code, timedOut: false });
+    });
+  });
+
+  assert.deepEqual(result, { code: 0, timedOut: false });
 });

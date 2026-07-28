@@ -59,6 +59,22 @@ export interface LangfuseScoreClient {
   shutdown?: () => Promise<void>;
 }
 
+export interface PendingScore {
+  traceId?: string;
+  sessionId?: string;
+  observationId?: string;
+  name: string;
+  value: number;
+  dataType?: "NUMERIC" | "BOOLEAN";
+  environment?: string;
+}
+
+export interface LangfuseRuntimeConfig {
+  publicKey: string;
+  secretKey: string;
+  host: string;
+}
+
 export interface LangfuseRuntime {
   startObservation: (
     name: string,
@@ -79,6 +95,15 @@ export interface LangfuseRuntime {
   tracerProvider?: { forceFlush?: () => Promise<void>; shutdown?: () => Promise<void> };
   clearTracerProvider?: () => void;
   restFallback?: unknown;
+  pendingScores?: PendingScore[];
+  scoreFlushAt?: number;
+  scoreFlushIntervalMs?: number;
+  scoreRequestTimeoutMs?: number;
+  scoreFlushTimer?: NodeJS.Timeout;
+  scoreFlushPromise?: Promise<void>;
+  scoreFlushController?: AbortController;
+  scoreFlushStopped?: boolean;
+  runtimeConfig?: LangfuseRuntimeConfig;
 }
 
 export interface GenerationState {

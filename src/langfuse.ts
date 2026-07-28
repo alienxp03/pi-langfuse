@@ -1,4 +1,4 @@
-import type { LangfuseRuntime, LangfuseScoreClient } from "./types.js";
+import type { LangfuseRuntime, LangfuseScoreClient, PendingScore } from "./types.js";
 import { state } from "./state.js";
 import { randomUUID } from "node:crypto";
 
@@ -60,6 +60,11 @@ interface RestFallbackStore {
 const OTEL_VISIBILITY_TIMEOUT_MS = 1_500;
 const OTEL_VISIBILITY_POLL_INTERVAL_MS = 200;
 const DEFAULT_SHUTDOWN_STEP_TIMEOUT_MS = 2_000;
+const DEFAULT_LANGFUSE_REQUEST_TIMEOUT_SECONDS = 5;
+const DEFAULT_SCORE_FLUSH_AT = 10;
+const DEFAULT_SCORE_FLUSH_INTERVAL_MS = 1_000;
+const MAX_SCORE_QUEUE_SIZE = 100_000;
+const MAX_SCORE_BATCH_SIZE = 100;
 
 let shutdownStepTimeoutMs = DEFAULT_SHUTDOWN_STEP_TIMEOUT_MS;
 
@@ -67,8 +72,27 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-function delay(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function resolvePositiveEnvNumber(name: string, fallback: number, integer = false): number {
+  const parsed = Number(process.env[name]);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return integer ? Math.floor(parsed) : parsed;
+}
+
+function delay(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+
+    const timeout = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timeout);
+      reject(signal.reason);
+    }, { once: true });
+  });
 }
 
 function debugLog(message: string) {
@@ -107,7 +131,14 @@ export function getLastRuntimeError(): { scope: string; message: string; timesta
   return lastRuntimeError;
 }
 
-async function withTimeout<T>(label: string, operation: Promise<T> | undefined): Promise<T | undefined> {
+async function withShutdownDeadline<T>(label: string, startOperation: () => Promise<T> | undefined, deadline: number): Promise<T | undefined> {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) {
+    debugLog(`📊 Langfuse: Skipped ${label}; shutdown deadline elapsed`);
+    return undefined;
+  }
+
+  const operation = startOperation();
   if (!operation) {
     return undefined;
   }
@@ -118,9 +149,9 @@ async function withTimeout<T>(label: string, operation: Promise<T> | undefined):
       operation,
       new Promise<undefined>((resolve) => {
         timeout = setTimeout(() => {
-          debugLog(`📊 Langfuse: ${label} timed out after ${shutdownStepTimeoutMs}ms`);
+          debugLog(`📊 Langfuse: ${label} timed out; shutdown deadline elapsed`);
           resolve(undefined);
-        }, shutdownStepTimeoutMs);
+        }, remainingMs);
       }),
     ]);
   } finally {
@@ -128,6 +159,142 @@ async function withTimeout<T>(label: string, operation: Promise<T> | undefined):
       clearTimeout(timeout);
     }
   }
+}
+
+function getRuntimeConfig(rt: LangfuseRuntime) {
+  return rt.runtimeConfig ?? state.config;
+}
+
+function ingestionHeaders(rt: LangfuseRuntime): Record<string, string> {
+  const config = getRuntimeConfig(rt);
+  if (!config) {
+    throw new Error("Langfuse runtime config is unavailable");
+  }
+
+  const auth = Buffer.from(`${config.publicKey}:${config.secretKey}`).toString("base64");
+  return {
+    Authorization: `Basic ${auth}`,
+    "Content-Type": "application/json",
+  };
+}
+
+async function ingestBatch(rt: LangfuseRuntime, batch: unknown[], signal: AbortSignal): Promise<unknown[]> {
+  const config = getRuntimeConfig(rt);
+  if (!config) {
+    throw new Error("Langfuse runtime config is unavailable");
+  }
+
+  const response = await fetch(`${config.host.replace(/\/$/, "")}/api/public/ingestion`, {
+    method: "POST",
+    headers: ingestionHeaders(rt),
+    body: JSON.stringify({ batch }),
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(`Langfuse ingestion failed with HTTP ${response.status}`);
+  }
+
+  const text = await response.text();
+  if (!text) {
+    return [];
+  }
+
+  const responseBody = JSON.parse(text) as { errors?: unknown[] };
+  return Array.isArray(responseBody.errors) ? responseBody.errors : [];
+}
+
+async function flushPendingScores(rt: LangfuseRuntime, signal: AbortSignal): Promise<void> {
+  const pendingScores = rt.pendingScores;
+  if (!pendingScores || pendingScores.length === 0) {
+    return;
+  }
+
+  while (pendingScores.length > 0) {
+    const scores = pendingScores.slice(0, MAX_SCORE_BATCH_SIZE);
+    try {
+      const errors = await ingestBatch(
+        rt,
+        scores.map((score) => ({
+          type: "score-create",
+          id: randomUUID(),
+          timestamp: nowIso(),
+          body: score,
+        })),
+        signal,
+      );
+      pendingScores.splice(0, scores.length);
+      if (errors.length > 0) {
+        rememberRuntimeError("score ingestion", new Error(JSON.stringify(errors)));
+        console.warn("📊 Langfuse: Score ingestion reported errors", errors);
+      }
+    } catch (error) {
+      if ((error as { name?: string }).name !== "AbortError") {
+        rememberRuntimeError("score ingestion", error);
+        console.warn("📊 Langfuse: Failed to flush scores", error);
+      }
+      return;
+    }
+  }
+}
+
+function clearScoreFlushTimer(rt: LangfuseRuntime) {
+  if (rt.scoreFlushTimer) {
+    clearTimeout(rt.scoreFlushTimer);
+    rt.scoreFlushTimer = undefined;
+  }
+}
+
+function scheduleScoreFlush(rt: LangfuseRuntime) {
+  if (
+    rt.scoreFlushStopped
+    || rt.scoreFlushTimer
+    || rt.scoreFlushPromise
+    || !rt.pendingScores?.length
+  ) {
+    return;
+  }
+
+  rt.scoreFlushTimer = setTimeout(() => {
+    rt.scoreFlushTimer = undefined;
+    void startScoreFlush(rt);
+  }, rt.scoreFlushIntervalMs ?? DEFAULT_SCORE_FLUSH_INTERVAL_MS);
+  rt.scoreFlushTimer.unref?.();
+}
+
+function startScoreFlush(rt: LangfuseRuntime): Promise<void> {
+  if (rt.scoreFlushPromise) {
+    return rt.scoreFlushPromise;
+  }
+
+  clearScoreFlushTimer(rt);
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(new DOMException("Langfuse score request timed out", "AbortError")),
+    rt.scoreRequestTimeoutMs ?? DEFAULT_LANGFUSE_REQUEST_TIMEOUT_SECONDS * 1_000,
+  );
+  timeout.unref?.();
+  rt.scoreFlushController = controller;
+
+  const promise = flushPendingScores(rt, controller.signal).finally(() => {
+    clearTimeout(timeout);
+    if (rt.scoreFlushPromise === promise) {
+      rt.scoreFlushPromise = undefined;
+    }
+    if (rt.scoreFlushController === controller) {
+      rt.scoreFlushController = undefined;
+    }
+    scheduleScoreFlush(rt);
+  });
+  rt.scoreFlushPromise = promise;
+  return promise;
+}
+
+function stopScoreFlush(rt: LangfuseRuntime) {
+  rt.scoreFlushStopped = true;
+  clearScoreFlushTimer(rt);
+  rt.scoreFlushController?.abort(
+    new DOMException("Langfuse score flushing stopped", "AbortError"),
+  );
 }
 
 function toIso(value: unknown): string | undefined {
@@ -258,27 +425,40 @@ function wrapObservation(
   };
 }
 
-async function traceExists(rt: LangfuseRuntime, traceId: string): Promise<boolean> {
+async function traceExists(rt: LangfuseRuntime, traceId: string, signal: AbortSignal): Promise<boolean> {
+  const config = getRuntimeConfig(rt);
+  if (!config) {
+    return false;
+  }
+
   try {
-    const traceApi = rt.scoreClient.api?.trace;
-    if (!traceApi?.get) {
+    const response = await fetch(
+      `${config.host.replace(/\/$/, "")}/api/public/traces/${encodeURIComponent(traceId)}`,
+      {
+        headers: ingestionHeaders(rt),
+        signal,
+      },
+    );
+    if (response.status === 404) {
       return false;
     }
-    const trace = await withTimeout("Trace visibility check", traceApi.get(traceId));
-    if (!trace) {
-      return false;
+    if (!response.ok) {
+      throw new Error(`Langfuse trace visibility check failed with HTTP ${response.status}`);
     }
     return true;
-  } catch {
+  } catch (error) {
+    if (signal.aborted) {
+      throw error;
+    }
     return false;
   }
 }
 
-async function waitForTraceVisibility(rt: LangfuseRuntime, traceId: string): Promise<boolean> {
+async function waitForTraceVisibility(rt: LangfuseRuntime, traceId: string, signal: AbortSignal): Promise<boolean> {
   const deadline = Date.now() + OTEL_VISIBILITY_TIMEOUT_MS;
 
   while (true) {
-    if (await traceExists(rt, traceId)) {
+    if (await traceExists(rt, traceId, signal)) {
       return true;
     }
 
@@ -287,7 +467,7 @@ async function waitForTraceVisibility(rt: LangfuseRuntime, traceId: string): Pro
       return false;
     }
 
-    await delay(Math.min(OTEL_VISIBILITY_POLL_INTERVAL_MS, remainingMs));
+    await delay(Math.min(OTEL_VISIBILITY_POLL_INTERVAL_MS, remainingMs), signal);
   }
 }
 
@@ -295,14 +475,14 @@ function eventTimestamp(record: { endTime?: string; startTime?: string; timestam
   return record.endTime ?? record.startTime ?? record.timestamp ?? nowIso();
 }
 
-async function fallbackToRestIngestion(rt: LangfuseRuntime) {
+async function fallbackToRestIngestion(rt: LangfuseRuntime, signal: AbortSignal) {
   const store = rt.restFallback as RestFallbackStore | undefined;
   if (!store?.trace || store.attempted) {
     return;
   }
   store.attempted = true;
 
-  if (await waitForTraceVisibility(rt, store.trace.id)) {
+  if (await waitForTraceVisibility(rt, store.trace.id, signal)) {
     return;
   }
 
@@ -355,31 +535,7 @@ async function fallbackToRestIngestion(rt: LangfuseRuntime) {
     });
   }
 
-  const ingestionApi = rt.scoreClient.api?.ingestion;
-  if (!ingestionApi?.batch) {
-    debugLog("📊 Langfuse: REST fallback ingestion is unavailable");
-    return;
-  }
-
-  const response = await withTimeout(
-    "REST fallback ingestion",
-    ingestionApi.batch({
-      batch,
-      metadata: {
-        source: "pi-langfuse",
-        fallback: "rest-ingestion",
-        reason: "otel-trace-not-visible-after-flush",
-      },
-    }),
-  );
-
-  if (!response) {
-    return;
-  }
-
-  const responseBody = response as { errors?: unknown[] } | undefined;
-  const responseErrors = responseBody?.errors;
-  const errors = Array.isArray(responseErrors) ? responseErrors : [];
+  const errors = await ingestBatch(rt, batch, signal);
   if (errors.length > 0) {
     rememberRuntimeError("REST fallback ingestion", new Error(JSON.stringify(errors)));
     console.warn("📊 Langfuse: REST fallback ingestion reported errors", errors);
@@ -426,6 +582,11 @@ export async function getRuntime(): Promise<LangfuseRuntime> {
 
     try {
       ensureOtelContextManager(context, AsyncHooksContextManager);
+      const scoreFlushAt = resolvePositiveEnvNumber("LANGFUSE_FLUSH_AT", DEFAULT_SCORE_FLUSH_AT, true);
+      const scoreFlushIntervalMs =
+        resolvePositiveEnvNumber("LANGFUSE_FLUSH_INTERVAL", DEFAULT_SCORE_FLUSH_INTERVAL_MS / 1_000) * 1_000;
+      const scoreRequestTimeoutMs =
+        resolvePositiveEnvNumber("LANGFUSE_TIMEOUT", DEFAULT_LANGFUSE_REQUEST_TIMEOUT_SECONDS) * 1_000;
       const spanProcessor = new LangfuseSpanProcessor({
         publicKey: state.config.publicKey,
         secretKey: state.config.secretKey,
@@ -449,6 +610,16 @@ export async function getRuntime(): Promise<LangfuseRuntime> {
         tracerProvider,
         clearTracerProvider: () => tracing.setLangfuseTracerProvider(null),
         restFallback,
+        pendingScores: [],
+        scoreFlushAt,
+        scoreFlushIntervalMs,
+        scoreRequestTimeoutMs,
+        scoreFlushStopped: false,
+        runtimeConfig: {
+          publicKey: state.config.publicKey,
+          secretKey: state.config.secretKey,
+          host: state.config.host,
+        },
       };
       lastRuntimeError = null;
     } catch (e) {
@@ -468,17 +639,36 @@ function doShutdownRuntime(): Promise<void> {
 
     const rt = runtime;
     runtime = null;
+    const deadline = Date.now() + shutdownStepTimeoutMs;
+    const controller = new AbortController();
+    const abortTimeout = setTimeout(() => controller.abort(), shutdownStepTimeoutMs);
+    stopScoreFlush(rt);
 
     try {
-      await withTimeout("OTel force flush", rt.tracerProvider?.forceFlush?.());
-      await fallbackToRestIngestion(rt);
-      await withTimeout("Langfuse score flush", rt.scoreClient.flush?.());
-      await withTimeout("Langfuse client shutdown", rt.scoreClient.shutdown?.());
-      await withTimeout("OTel tracer shutdown", rt.tracerProvider?.shutdown?.());
+      await withShutdownDeadline(
+        "Active score flush",
+        () => rt.scoreFlushPromise,
+        deadline,
+      );
+      await withShutdownDeadline("OTel force flush", () => rt.tracerProvider?.forceFlush?.(), deadline);
+      await withShutdownDeadline(
+        "REST fallback ingestion",
+        () => fallbackToRestIngestion(rt, controller.signal),
+        deadline,
+      );
+      await flushPendingScores(rt, controller.signal);
+      await withShutdownDeadline("Langfuse score flush", () => rt.scoreClient.flush?.(), deadline);
+      await withShutdownDeadline("Langfuse client shutdown", () => rt.scoreClient.shutdown?.(), deadline);
+      await withShutdownDeadline("OTel tracer shutdown", () => rt.tracerProvider?.shutdown?.(), deadline);
     } catch (e) {
       rememberRuntimeError("runtime shutdown", e);
       console.warn("📊 Langfuse: Failed to flush/shutdown cleanly", e);
     } finally {
+      clearTimeout(abortTimeout);
+      clearScoreFlushTimer(rt);
+      rt.scoreFlushController?.abort();
+      rt.scoreFlushController = undefined;
+      rt.scoreFlushPromise = undefined;
       if (!runtime) {
         rt.clearTracerProvider?.();
       }
@@ -516,7 +706,13 @@ export async function forceShutdownRuntime(): Promise<void> {
 }
 
 export function __setRuntimeForTest(rt: LangfuseRuntime | null, timeoutMs = DEFAULT_SHUTDOWN_STEP_TIMEOUT_MS): void {
+  if (runtime && runtime !== rt) {
+    stopScoreFlush(runtime);
+  }
   runtime = rt;
+  if (rt) {
+    rt.scoreFlushStopped = false;
+  }
   shutdownStepTimeoutMs = timeoutMs;
   activeSessions.clear();
 }
@@ -524,14 +720,35 @@ export function __setRuntimeForTest(rt: LangfuseRuntime | null, timeoutMs = DEFA
 export async function sendScore(name: string, value: number, options: { traceId?: string; observationId?: string } = {}) {
   try {
     const rt = await getRuntime();
-    rt.scoreClient.score?.create({
+    const score: PendingScore = {
       name,
       value,
       dataType: name === "session_had_errors" || name === "tool_is_error" ? "BOOLEAN" : "NUMERIC",
       traceId: options.traceId,
       observationId: options.observationId,
       sessionId: options.traceId ? undefined : state.currentSessionId || undefined,
-    });
+      ...(process.env.LANGFUSE_TRACING_ENVIRONMENT
+        ? { environment: process.env.LANGFUSE_TRACING_ENVIRONMENT }
+        : {}),
+    };
+    if (!rt.pendingScores) {
+      return;
+    }
+    if (rt.pendingScores.length >= MAX_SCORE_QUEUE_SIZE) {
+      const error = new Error(
+        `Langfuse score queue is full (${MAX_SCORE_QUEUE_SIZE}); dropping score`,
+      );
+      rememberRuntimeError("score queue", error);
+      console.warn(`📊 Langfuse: ${error.message}`);
+      return;
+    }
+
+    rt.pendingScores.push(score);
+    if (rt.pendingScores.length >= (rt.scoreFlushAt ?? DEFAULT_SCORE_FLUSH_AT)) {
+      void startScoreFlush(rt);
+    } else {
+      scheduleScoreFlush(rt);
+    }
   } catch (e) {
     rememberRuntimeError(`score ${name}`, e);
     console.warn(`📊 Langfuse: Failed to send score ${name}`, e);
