@@ -70,6 +70,7 @@ export async function startGeneration(event: Record<string, unknown>) {
       },
       asType: "generation",
       tags: state.config?.tags,
+      sessionId: state.config && state.currentSessionId ? state.currentSessionId : undefined,
     });
 
     state.agentState.activeGenerations.set(key, {
@@ -238,6 +239,7 @@ export async function createFallbackGenerationFromTurn(event: Record<string, unk
       },
       asType: "generation",
       tags: state.config?.tags,
+      sessionId: state.config && state.currentSessionId ? state.currentSessionId : undefined,
     });
 
     generation.end();

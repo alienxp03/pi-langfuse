@@ -50,6 +50,7 @@ export async function startToolObservation(event: Record<string, unknown>) {
       },
       asType: "tool",
       tags: state.config?.tags,
+      sessionId: state.config && state.currentSessionId ? state.currentSessionId : undefined,
     });
 
     state.toolCallCount++;

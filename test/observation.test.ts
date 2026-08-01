@@ -19,7 +19,11 @@ function makeObservation(id: string): LangfuseObservation & { children: string[]
   };
 }
 
-function makeRuntime(calls: string[], propagatedTags?: string[][]): LangfuseRuntime {
+function makeRuntime(
+  calls: string[],
+  propagatedTags?: string[][],
+  propagatedSessions?: string[],
+): LangfuseRuntime {
   return {
     startObservation(name: string) {
       calls.push(name);
@@ -27,6 +31,7 @@ function makeRuntime(calls: string[], propagatedTags?: string[][]): LangfuseRunt
     },
     propagateAttributes(params, fn) {
       if (params.tags) propagatedTags?.push(params.tags);
+      if (params.sessionId) propagatedSessions?.push(params.sessionId);
       return fn();
     },
     scoreClient: {},
@@ -50,19 +55,22 @@ test("startChildObservation prefers parent startObservation when available", asy
   assert.deepEqual(runtimeCalls, []);
 });
 
-test("startChildObservation propagates tags to parented observations", async () => {
+test("startChildObservation propagates trace attributes to parented observations", async () => {
   const parent = makeObservation("parent");
   const tags: string[][] = [];
+  const sessions: string[] = [];
 
   await startChildObservation({
     parent,
-    runtime: async () => makeRuntime([], tags),
+    runtime: async () => makeRuntime([], tags, sessions),
     name: "tool",
     asType: "tool",
     tags: ["pi", "local"],
+    sessionId: "session-1",
   });
 
   assert.deepEqual(tags, [["pi", "local"]]);
+  assert.deepEqual(sessions, ["session-1"]);
 });
 
 test("startChildObservation falls back to runtime when parent cannot start children", async () => {

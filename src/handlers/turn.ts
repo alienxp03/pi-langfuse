@@ -34,6 +34,7 @@ export async function startTurnObservation(event: Record<string, unknown>) {
       },
       asType: "span",
       tags: state.config?.tags,
+      sessionId: state.config && state.currentSessionId ? state.currentSessionId : undefined,
     });
 
     state.agentState.activeTurn = observation;

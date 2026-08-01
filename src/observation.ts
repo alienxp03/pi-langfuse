@@ -7,6 +7,7 @@ export async function startChildObservation({
   body,
   asType,
   tags,
+  sessionId,
 }: {
   parent: LangfuseObservation;
   runtime: () => Promise<LangfuseRuntime>;
@@ -14,8 +15,9 @@ export async function startChildObservation({
   body?: ObservationUpdate;
   asType: "generation" | "tool" | "span";
   tags?: string[];
+  sessionId?: string;
 }): Promise<LangfuseObservation> {
-  if (parent.startObservation && !tags?.length) {
+  if (parent.startObservation && !tags?.length && !sessionId) {
     return parent.startObservation(name, body, { asType });
   }
 
@@ -25,5 +27,7 @@ export async function startChildObservation({
       ? parent.startObservation(name, body, { asType })
       : rt.startObservation(name, body, { asType });
 
-  return tags?.length ? rt.propagateAttributes({ tags }, start) : start();
+  return tags?.length || sessionId
+    ? rt.propagateAttributes({ tags, sessionId }, start)
+    : start();
 }
