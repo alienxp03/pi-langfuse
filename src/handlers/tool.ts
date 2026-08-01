@@ -5,6 +5,7 @@ import {
   getToolCallId,
   getToolName,
   getToolInput,
+  getToolObservationName,
   shapePayload,
   extractTextContent,
   truncate,
@@ -28,6 +29,7 @@ export async function startToolObservation(event: Record<string, unknown>) {
   try {
     const toolName = getToolName(event);
     const toolInput = getToolInput(event);
+    const observationName = getToolObservationName(toolName, toolInput);
     const shapedInput = shapePayload(toolInput, { maxString: getLimits().maxToolPayload });
     const captured = applyCapturePolicy(
       {
@@ -41,12 +43,13 @@ export async function startToolObservation(event: Record<string, unknown>) {
     const tool = await startChildObservation({
       parent,
       runtime: getRuntime,
-      name: toolName,
+      name: observationName,
       body: {
         input: captured.toolInput,
         metadata: { ...(captured.metadata ?? {}), inputBytes },
       },
       asType: "tool",
+      tags: state.config?.tags,
     });
 
     state.toolCallCount++;

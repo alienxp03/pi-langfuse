@@ -14,7 +14,9 @@ Langfuse observability extension for [Pi Coding Agent](https://github.com/earend
 - Final assistant output capture, tool error visibility, and trace-level scores.
 - Privacy controls for inputs, outputs, tool I/O, system prompt, and cwd.
 - Secret redaction and local path hashing before upload.
-- REST fallback for self-hosted Langfuse setups where OTel spans arrive but traces do not materialize.
+- Langfuse v4-native OTLP ingestion without deprecated trace visibility probes or legacy span retries.
+- Descriptive tool observation names for readable collapsed trace flows.
+- Direct MCP tools use the consistent `mcp.<server>.<tool>` naming convention.
 
 ## Prerequisites
 
@@ -73,6 +75,7 @@ Set these before starting Pi:
 export LANGFUSE_PUBLIC_KEY="pk-lf-xxxx"
 export LANGFUSE_SECRET_KEY="sk-lf-xxxx"
 export LANGFUSE_BASE_URL="https://cloud.langfuse.com"  # optional; LANGFUSE_HOST is also supported
+export PI_LANGFUSE_TAGS="pi,local"                      # optional; JSON arrays are also supported
 ```
 
 Saved config takes precedence. Environment variables are only used when `~/.pi/agent/pi-langfuse/config.json` is missing or incomplete.

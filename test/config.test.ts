@@ -4,7 +4,40 @@ import { mkdtempSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { loadConfigFromFile, saveConfig, sanitizeConfigForLog } from "../src/config.ts";
+import {
+  loadConfigFromEnv,
+  loadConfigFromFile,
+  parseTags,
+  saveConfig,
+  sanitizeConfigForLog,
+} from "../src/config.ts";
+
+test("PI_LANGFUSE_TAGS accepts JSON and comma-separated values", () => {
+  assert.deepEqual(parseTags("pi, local, pi"), ["pi", "local"]);
+  assert.deepEqual(parseTags('["pi", "integration"]'), ["pi", "integration"]);
+
+  const config = loadConfigFromEnv({
+    LANGFUSE_PUBLIC_KEY: "pk-lf-test",
+    LANGFUSE_SECRET_KEY: "sk-lf-test",
+    PI_LANGFUSE_TAGS: "pi,local",
+  });
+  assert.deepEqual(config?.tags, ["pi", "local"]);
+});
+
+test("PI_LANGFUSE_TAGS overrides tags in saved config", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-langfuse-tags-"));
+  const configPath = join(dir, "config.json");
+  writeFileSync(configPath, JSON.stringify({
+    publicKey: "pk-lf-test",
+    secretKey: "sk-lf-test",
+    tags: ["saved"],
+  }));
+
+  assert.deepEqual(
+    loadConfigFromFile(configPath, { PI_LANGFUSE_TAGS: "pi,env" })?.tags,
+    ["pi", "env"],
+  );
+});
 
 test("env privacy flags override saved config capture policy", () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-langfuse-config-"));

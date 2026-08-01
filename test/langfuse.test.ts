@@ -584,7 +584,7 @@ test("score flush logs per-event ingestion errors", async () => {
   }
 });
 
-test("REST fallback checks visibility and ingests the trace through abortable HTTP", async () => {
+test("shutdown does not probe or write through deprecated trace ingestion", async () => {
   const requests: Array<{ method: string; url: string; body?: string }> = [];
   const runtime = {
     startObservation: (() => {
@@ -632,12 +632,7 @@ test("REST fallback checks visibility and ingests the trace through abortable HT
     __setRuntimeForTest(runtime, 2_000);
     await forceShutdownRuntime();
 
-    assert.ok(requests.some((request) =>
-      request.method === "GET"
-      && request.url === "https://example.com/api/public/traces/fallback-trace"));
-    const ingestion = requests.find((request) => request.method === "POST");
-    assert.equal(ingestion?.url, "https://example.com/api/public/ingestion");
-    assert.match(ingestion?.body ?? "", /"type":"trace-create"/);
+    assert.deepEqual(requests, []);
   } finally {
     __setRuntimeForTest(null);
     globalThis.fetch = originalFetch;

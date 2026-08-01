@@ -651,11 +651,8 @@ function doShutdownRuntime(): Promise<void> {
         deadline,
       );
       await withShutdownDeadline("OTel force flush", () => rt.tracerProvider?.forceFlush?.(), deadline);
-      await withShutdownDeadline(
-        "REST fallback ingestion",
-        () => fallbackToRestIngestion(rt, controller.signal),
-        deadline,
-      );
+      // Langfuse v4 is OTLP-native. Do not probe deprecated trace endpoints or
+      // retry spans through legacy generation-create/span-create ingestion.
       await flushPendingScores(rt, controller.signal);
       await withShutdownDeadline("Langfuse score flush", () => rt.scoreClient.flush?.(), deadline);
       await withShutdownDeadline("Langfuse client shutdown", () => rt.scoreClient.shutdown?.(), deadline);

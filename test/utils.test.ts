@@ -4,9 +4,29 @@ import assert from "node:assert/strict";
 import {
   extractAssistantOutput,
   extractModelParameters,
+  getToolObservationName,
   normalizeContentForLangfuse,
   shapePayload,
 } from "../src/utils.ts";
+
+test("getToolObservationName adds concise semantic details", () => {
+  assert.equal(
+    getToolObservationName("bash", { command: "date '+%Y-%m-%d %H:%M:%S %Z'" }),
+    "bash · date '+%Y-%m-%d %H:%M:%S %Z'",
+  );
+  assert.equal(
+    getToolObservationName("mcp", { tool: "get_current_time", args: { timezone: "Europe/London" } }),
+    "mcp · get_current_time",
+  );
+  assert.equal(
+    getToolObservationName("web_search", { query: "Langfuse" }),
+    "web_search · Langfuse",
+  );
+  assert.match(
+    getToolObservationName("read", { path: "/Users/stan/secret.txt" }),
+    /^read · \[PATH_HASH:[a-f0-9]{12}\]$/,
+  );
+});
 
 test("shapePayload aborts when node budget is exceeded", () => {
   const payload = {

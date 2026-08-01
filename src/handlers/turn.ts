@@ -33,6 +33,7 @@ export async function startTurnObservation(event: Record<string, unknown>) {
         metadata: captured.metadata,
       },
       asType: "span",
+      tags: state.config?.tags,
     });
 
     state.agentState.activeTurn = observation;

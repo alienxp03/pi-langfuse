@@ -69,6 +69,7 @@ export async function startGeneration(event: Record<string, unknown>) {
         metadata: captured.metadata,
       },
       asType: "generation",
+      tags: state.config?.tags,
     });
 
     state.agentState.activeGenerations.set(key, {
@@ -236,6 +237,7 @@ export async function createFallbackGenerationFromTurn(event: Record<string, unk
         metadata: captured.metadata,
       },
       asType: "generation",
+      tags: state.config?.tags,
     });
 
     generation.end();

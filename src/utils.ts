@@ -2,6 +2,7 @@ import { getLimits } from "./limits.js";
 import { createCapturePolicy, type CapturePolicy } from "./capture-policy.js";
 import { redactValue } from "./redaction.js";
 import { state } from "./state.js";
+import { getDirectMcpObservationName } from "./mcp-tool-name.js";
 
 export function getCapturePolicy(): CapturePolicy {
   return state.config?.capturePolicy ?? createCapturePolicy();
@@ -326,6 +327,55 @@ export function getToolInput(event: Record<string, unknown>): unknown {
     (event.call && typeof event.call === "object" ? (event.call as Record<string, unknown>).input : undefined) ??
     event
   );
+}
+
+const TOOL_NAME_DETAIL_MAX_CHARS = 120;
+
+function compactToolNameDetail(value: unknown): string | undefined {
+  const redacted = redactValue(value);
+  let text: string | undefined;
+  if (typeof redacted === "string") text = redacted;
+  else if (Array.isArray(redacted) && redacted.every((item) => typeof item === "string")) {
+    text = redacted.join(" ");
+  }
+  if (!text) return undefined;
+
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (!compact) return undefined;
+  return compact.length <= TOOL_NAME_DETAIL_MAX_CHARS
+    ? compact
+    : `${compact.slice(0, TOOL_NAME_DETAIL_MAX_CHARS - 1)}…`;
+}
+
+/** Build a concise observation name while retaining full tool input separately. */
+export function getToolObservationName(toolName: string, toolInput: unknown): string {
+  const directMcpName = getDirectMcpObservationName(toolName);
+  if (directMcpName) return directMcpName;
+
+  if (!toolInput || typeof toolInput !== "object" || Array.isArray(toolInput)) {
+    const detail = compactToolNameDetail(toolInput);
+    return detail ? `${toolName} · ${detail}` : toolName;
+  }
+
+  const input = toolInput as Record<string, unknown>;
+  let detail: unknown;
+  if (toolName === "mcp") {
+    detail = input.tool ?? input.describe ?? input.connect ?? input.search ?? input.action;
+  } else {
+    detail =
+      input.command ??
+      input.cmd ??
+      input.path ??
+      input.file_path ??
+      input.filePath ??
+      input.query ??
+      input.search ??
+      input.pattern ??
+      input.url;
+  }
+
+  const compact = compactToolNameDetail(detail);
+  return compact ? `${toolName} · ${compact}` : toolName;
 }
 
 export function getProviderPayload(event: Record<string, unknown>): unknown {

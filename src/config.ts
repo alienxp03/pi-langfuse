@@ -7,6 +7,25 @@ import { forceShutdownRuntime } from "./langfuse.js";
 import { createCapturePolicy, type EnvLike } from "./capture-policy.js";
 import { createPayloadLimits } from "./limits.js";
 
+export function parseTags(value: unknown): string[] | undefined {
+  if (Array.isArray(value)) {
+    const tags = value.map(String).map((tag) => tag.trim()).filter(Boolean);
+    return tags.length > 0 ? [...new Set(tags)] : undefined;
+  }
+  if (typeof value !== "string" || value.trim().length === 0) return undefined;
+
+  const trimmed = value.trim();
+  if (trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) return parseTags(parsed);
+    } catch {
+      // Fall through to comma-separated parsing.
+    }
+  }
+  return parseTags(trimmed.split(","));
+}
+
 export function loadConfigFromFile(path = CONFIG_PATH, env: EnvLike = process.env as EnvLike): Config | null {
   if (existsSync(path)) {
     try {
@@ -22,6 +41,7 @@ export function loadConfigFromFile(path = CONFIG_PATH, env: EnvLike = process.en
           publicKey: config.publicKey,
           secretKey: config.secretKey,
           host: config.host || DEFAULT_LANGFUSE_HOST,
+          tags: parseTags(env.PI_LANGFUSE_TAGS) ?? parseTags(config.tags),
           capturePolicy: createCapturePolicy(captureSource),
           limits: createPayloadLimits(env),
         };
@@ -45,6 +65,7 @@ export function loadConfigFromEnv(env: EnvLike = process.env as EnvLike): Config
     publicKey,
     secretKey,
     host: env.LANGFUSE_BASE_URL || env.LANGFUSE_HOST || DEFAULT_LANGFUSE_HOST,
+    tags: parseTags(env.PI_LANGFUSE_TAGS),
     capturePolicy: createCapturePolicy(env),
     limits: createPayloadLimits(env),
   };

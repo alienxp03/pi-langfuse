@@ -99,6 +99,7 @@ export async function startAgentRun(event: Record<string, unknown>, ctx: any) {
       {
         sessionId: state.currentSessionId ? truncate(state.currentSessionId, 200) : undefined,
         traceName: "pi-agent",
+        tags: state.config?.tags,
         metadata: stringMetadata(captured.metadata),
       },
       () =>
