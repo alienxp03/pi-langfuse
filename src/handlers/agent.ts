@@ -1,6 +1,6 @@
 import { state, resetRunState, computeEvaluationScores } from "../state.js";
 import { getRuntime, sendScore } from "../langfuse.js";
-import { ensureConfig } from "../config.js";
+import { loadConfig } from "../config.js";
 import { shapePayload, truncate, extractFinalAssistant, extractAssistantOutput, getCapturePolicy, getLimits } from "../utils.js";
 import { closeDanglingObservations } from "./tool.js";
 import { applyCapturePolicy } from "../capture-policy.js";
@@ -36,7 +36,11 @@ export function updateTraceIO(input?: unknown, output?: unknown) {
 }
 
 export async function startAgentRun(event: Record<string, unknown>, ctx: any) {
-  if (!(await ensureConfig(ctx))) {
+  if (!state.config) {
+    state.config = loadConfig();
+  }
+
+  if (!state.config) {
     state.isTracingDisabled = true;
     return;
   }

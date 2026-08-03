@@ -7,7 +7,6 @@ import {
   loadConfigFromFile,
   sanitizeConfigForLog,
   saveConfig,
-  ensureConfig,
 } from "./config.js";
 import { createCapturePolicy, type PrivacyPreset, type CapturePolicy } from "./capture-policy.js";
 import { getRuntime, getLastRuntimeError, forceShutdownRuntime as shutdownLangfuseRuntime } from "./langfuse.js";
@@ -358,8 +357,14 @@ export async function handleLangfuseTestCommand(
     return false;
   }
 
-  if (!state.config && !(await ensureConfig(ctx))) {
-    notify(ctx, "Langfuse is not configured yet. Run /langfuse-setup first.", "warning");
+  const env = deps.env ?? process.env;
+  const configPath = deps.configPath ?? CONFIG_PATH;
+  if (!state.config) {
+    state.config = loadConfig(env, configPath);
+  }
+
+  if (!state.config) {
+    notify(ctx, "Langfuse is not configured yet. Run /langfuse-setup or set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY first.", "warning");
     return false;
   }
 

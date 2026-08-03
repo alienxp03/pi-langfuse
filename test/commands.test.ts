@@ -13,6 +13,29 @@ function never(): Promise<void> {
   return new Promise(() => {});
 }
 
+test("test command stays quiet when Langfuse is not configured", async () => {
+  state.config = null;
+  const notifications: Array<{ message: string; level?: string }> = [];
+  const configPath = join(tmpdir(), `pi-langfuse-missing-${Date.now()}.json`);
+
+  const ok = await handleLangfuseTestCommand("", {
+    hasUI: true,
+    ui: {
+      notify: (message, level) => {
+        notifications.push({ message, level });
+      },
+    },
+  }, {
+    configPath,
+    env: {},
+  });
+
+  assert.equal(ok, false);
+  assert.equal(notifications[0]?.level, "warning");
+  assert.match(notifications[0]?.message ?? "", /not configured yet/);
+  state.config = null;
+});
+
 function makeObservation(): LangfuseObservation {
   return {
     id: "observation-id",

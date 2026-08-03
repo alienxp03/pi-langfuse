@@ -11,7 +11,7 @@ import { basename } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { state, resetRunState, runWithSession, setCurrentSession } from "./src/state.js";
-import { ensureConfig, promptForConfig, loadConfig } from "./src/config.js";
+import { promptForConfig, loadConfig } from "./src/config.js";
 import { shutdownRuntime } from "./src/langfuse.js";
 import { handleLangfusePrivacyCommand, handleLangfuseStatusCommand, handleLangfuseTestCommand } from "./src/commands.js";
 import { getMessageFromEvent, extractAssistantOutput, getCapturePolicy } from "./src/utils.js";
@@ -43,7 +43,7 @@ export default async function (pi: ExtensionAPI) {
   if (state.config) {
     console.log("📊 Langfuse: Tracing enabled →", state.config.host);
   } else {
-    console.log("📊 Langfuse: Waiting for first-run setup");
+    console.log("📊 Langfuse: Tracing disabled (no config or environment credentials)");
   }
 
   pi.registerCommand("langfuse-setup", {
@@ -87,7 +87,7 @@ export default async function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => withSession(ctx, async () => {
     state.setupAttemptedThisSession = false;
-    await ensureConfig(ctx);
+    state.config = loadConfig();
     resetRunState();
   }));
 
