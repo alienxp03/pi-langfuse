@@ -38,7 +38,7 @@ The extension maps Pi events onto one Langfuse trace tree:
 
 The main event flow is:
 
-1. `session_start`: ensure config and reset run state for the session.
+1. `session_start`: load optional config and reset run state for the session.
 2. `before_agent_start` / `agent_start`: create the root agent observation if missing.
 3. `turn_start`: open a turn span.
 4. `before_provider_request`: start a generation.
@@ -66,17 +66,22 @@ The main event flow is:
 
 ## Config Behavior
 
-Config precedence is:
+Langfuse is opt-in. Tracing is enabled only when a complete configuration is available:
 
 1. `~/.pi/agent/pi-langfuse/config.json`
 2. `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`
 3. `LANGFUSE_BASE_URL` or `LANGFUSE_HOST`
-4. Interactive `/langfuse-setup` in Pi UI when config is missing
+
+If neither a complete config file nor both credential environment variables are available,
+the extension remains loaded but tracing is disabled and Pi never prompts during startup or
+normal agent runs. `/langfuse-setup` is the explicit interactive opt-in command.
 
 Relevant implementation details:
 
 - `src/config.ts` loads saved config first, then env vars.
-- First-run setup is only attempted once per session via `state.setupAttemptedThisSession`.
+- `index.ts` loads optional config at startup without invoking the setup UI.
+- `src/handlers/agent.ts` skips tracing when no config is available.
+- `/langfuse-test` reports missing configuration instead of opening setup UI.
 - Manual `/langfuse-setup` clears cached config and shuts down the runtime before reconfiguring.
 
 ## Langfuse-Specific Notes

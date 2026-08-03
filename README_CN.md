@@ -30,10 +30,7 @@
    pi install npm:pi-langfuse
    ```
 
-2. 首次运行 Pi 时，如果尚未配置凭据，Pi 会提示输入：
-   - Langfuse 公钥，以 `pk-lf-...` 开头
-   - Langfuse 密钥，以 `sk-lf-...` 开头
-   - Langfuse 主机地址，默认 `https://cloud.langfuse.com`
+2. 通过 `/langfuse-setup` 显式配置 Langfuse，或在启动 Pi 前提供完整的 Langfuse 环境变量。如果两者都没有，扩展会保持禁用且不会提示输入。
 
 3. 正常运行 Pi：
 
@@ -49,13 +46,15 @@ Langfuse API 密钥可在 **Langfuse Cloud** -> **Settings** -> **API Keys** 中
 
 ### 方式 1：交互式设置
 
-加载扩展后运行任意 `pi` 命令。首次运行且未配置时，Pi 会在 CLI 或 TUI 中提示输入，并将结果保存到 `~/.pi/agent/pi-langfuse/config.json`。
-
-如需重新执行设置：
+在 Pi 中执行以下命令可显式启用追踪。命令会在 CLI 或 TUI 中提示输入，并将结果保存到 `~/.pi/agent/pi-langfuse/config.json`：
 
 ```text
 /langfuse-setup
 ```
+
+正常启动时如果未配置 Langfuse，Pi 不会提示输入。
+
+如需重新执行设置，请再次执行 `/langfuse-setup`。
 
 如需查看当前配置状态且不泄漏密钥：
 
@@ -67,7 +66,7 @@ Langfuse API 密钥可在 **Langfuse Cloud** -> **Settings** -> **API Keys** 中
 
 ### 方式 2：环境变量
 
-在启动 Pi 前设置：
+在启动 Pi 前设置完整的凭据：
 
 ```bash
 export LANGFUSE_PUBLIC_KEY="pk-lf-xxxx"
@@ -75,7 +74,7 @@ export LANGFUSE_SECRET_KEY="sk-lf-xxxx"
 export LANGFUSE_BASE_URL="https://cloud.langfuse.com"  # 可选；也支持 LANGFUSE_HOST
 ```
 
-保存的配置优先级更高。只有当 `~/.pi/agent/pi-langfuse/config.json` 缺失或不完整时，扩展才会使用环境变量。
+完整的环境变量配置就是显式启用开关。如果缺少任一凭据，Langfuse 会保持禁用且不会提示输入。保存的配置优先级更高。只有当 `~/.pi/agent/pi-langfuse/config.json` 缺失或不完整时，扩展才会使用环境变量。
 
 隐私采集策略也可以通过环境变量设置：
 

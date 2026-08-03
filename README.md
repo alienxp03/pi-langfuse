@@ -32,10 +32,7 @@ Langfuse observability extension for [Pi Coding Agent](https://github.com/earend
    pi install npm:pi-langfuse
    ```
 
-2. Run Pi once. If no credentials are configured yet, Pi prompts for:
-   - Langfuse public key, starting with `pk-lf-...`
-   - Langfuse secret key, starting with `sk-lf-...`
-   - Langfuse host, defaulting to `https://cloud.langfuse.com`
+2. Configure Langfuse explicitly with `/langfuse-setup`, or provide both Langfuse environment variables before starting Pi. If neither is present, the extension stays disabled and does not prompt.
 
 3. Run Pi normally:
 
@@ -51,13 +48,15 @@ Langfuse API keys are available in **Langfuse Cloud** -> **Settings** -> **API K
 
 ### Method 1: Interactive setup
 
-Run any `pi` command with the extension loaded. On first run without configuration, Pi prompts in the CLI or TUI and saves the result to `~/.pi/agent/pi-langfuse/config.json`.
-
-To run setup again:
+Run this command inside Pi to explicitly enable tracing. It prompts in the CLI or TUI and saves the result to `~/.pi/agent/pi-langfuse/config.json`:
 
 ```text
 /langfuse-setup
 ```
+
+Pi never prompts during normal startup when Langfuse is not configured.
+
+To run setup again, execute `/langfuse-setup`.
 
 To inspect the active configuration without exposing secrets:
 
@@ -69,7 +68,7 @@ The status command reports the config source, host, masked public key, capture p
 
 ### Method 2: Environment variables
 
-Set these before starting Pi:
+Set both credentials before starting Pi:
 
 ```bash
 export LANGFUSE_PUBLIC_KEY="pk-lf-xxxx"
@@ -78,7 +77,7 @@ export LANGFUSE_BASE_URL="https://cloud.langfuse.com"  # optional; LANGFUSE_HOST
 export PI_LANGFUSE_TAGS="pi,local"                      # optional; JSON arrays are also supported
 ```
 
-Saved config takes precedence. Environment variables are only used when `~/.pi/agent/pi-langfuse/config.json` is missing or incomplete.
+The complete environment configuration is an opt-in switch. If either credential is missing, Langfuse remains disabled and does not prompt. Saved config takes precedence. Environment variables are only used when `~/.pi/agent/pi-langfuse/config.json` is missing or incomplete.
 
 Privacy controls can also be set through environment variables:
 
